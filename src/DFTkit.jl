@@ -1,4 +1,4 @@
-module dftkit
+module qekit
       using Shell
       using DelimitedFiles
 
@@ -10,13 +10,15 @@ module dftkit
 
       end
 
-      struct sumr
-
-      end
-
-      function check_kpoint(scf_file,nk)
+      function check_kpoint(scf_file,nk; offset=false)
             scf = scf_file
             Shell.run("cp $scf tmp_scf")
+
+            if offset==false
+                  off = 0
+            else
+                  off = 1
+            end
 
             data = []
             for k in nk
@@ -27,7 +29,7 @@ module dftkit
                                     pos = iline
                               end
                               if iline == pos + 1
-                                    kline = " $k  $k  $k  0 0 0"
+                                    kline = " $k  $k  $k  $off $off $off"
                                     cmd = "sed -i 's/$line/$kline/g' tmp_scf"
                                     Shell.run(cmd)
                                     break
@@ -35,23 +37,21 @@ module dftkit
                         end
                   end
 
-                  case = " $k  $k  $k  0 0 0"
-                  @info "Running for $case"
-                  cmd = "mpirun -np 4 pw.x -in tmp_scf > k_analysis.out"
+                  prefix = "k_analysis.out"
+                  @info "Running for $k  $k  $k  $off $off $off"
+
+                  cmd = "mpirun -np 4 pw.x -in tmp_scf > $prefix"
                   Shell.run(cmd)
 
-                  prefix = "k_analysis.out"
                   f = open(prefix) do file
                         for (iline,line) in enumerate(eachline(file))
                               if occursin("!    total energy",line) == true
                                     en = split(line,"=")
-                                    en = split(en[2])[1]
-                                    en = parse(Float64,en)
+                                    en = parse(Float64,split(en[2])[1])
                                     push!(data,en)
                               end
                         end
                   end
-
                   Shell.run("rm -rf $prefix")
             end
             Shell.run("rm -rf tmp_scf")
@@ -106,10 +106,11 @@ module dftkit
 
       function get_dos(prefix,tmp)
             fildos = """&DOS
- prefix=\"$prefix\",
- outdir=\"$tmp\",
- fildos=\"tmp.dos\"/
-"""
+                   prefix=\"$prefix\",
+                   outdir=\"$tmp\",
+                   fildos=\"tmp.dos\"
+                  /
+                  """
 
             open("fildos.in","w") do io
                   write(io,fildos)
@@ -122,26 +123,21 @@ module dftkit
             else
                   nspin = 1
             end
-            @show nspin
+
             w = x[2:end,1]
             w = convert(Vector{Float64},w)
             if nspin == 2
-                  dup = x[2:end,2]
-                  dup = convert(Vector{Float64},dup)
-                  ddw = x[2:end,3]
-                  ddw = convert(Vector{Float64},ddw)
-                  cum_occ = x[2:end,4]
-                  cum_occ = convert(Vector{Float64},cum_occ)
+                  dup = convert(Vector{Float64},x[2:end,2])
+                  ddw = convert(Vector{Float64},x[2:end,3])
+                  cum_occ = convert(Vector{Float64},x[2:end,4])
 
                   Shell.run("rm -rf fildos.in")
                   Shell.run("rm -rf tmp.dos")
 
                   return w,dup,ddw,cum_occ
             elseif nspin == 1
-                  dos = x[2:end,2]
-                  dos = convert(Vector{Float64},dos)
-                  cum_occ = x[2:end,3]
-                  cum_occ = convert(Vector{Float64},cum_occ)
+                  dos = convert(Vector{Float64},x[2:end,2])
+                  cum_occ = convert(Vector{Float64},x[2:end,3])
 
                   Shell.run("rm -rf fildos.in")
                   Shell.run("rm -rf tmp.dos")
@@ -154,20 +150,20 @@ module dftkit
       function get_band(prefix,pwband,tmp,spin)
             if spin == "up"
                   filband = """&BANDS
-       outdir=\"$tmp\",
-       prefix=\"$prefix\",
-       filband=\"tmp.band\",
-       spin_component = 1
-      /
-      """
+                         outdir=\"$tmp\",
+                         prefix=\"$prefix\",
+                         filband=\"tmp.band\",
+                         spin_component = 1
+                        /
+                        """
             elseif spin == "down"
                   filband = """&BANDS
-       outdir=\"$tmp\",
-       prefix=\"$prefix\",
-       filband=\"tmp.band\",
-       spin_component = 2
-      /
-      """
+                         outdir=\"$tmp\",
+                         prefix=\"$prefix\",
+                         filband=\"tmp.band\",
+                         spin_component = 2
+                        /
+                        """
             end
 
             open("filband.in","w") do io
@@ -180,8 +176,7 @@ module dftkit
                   for (iline,line) in enumerate(eachline(file))
                         if occursin("nbnd",line) == true
                               nb = split(line,"=")
-                              nb = split(nb[2])[1]
-                              nb = parse(Int64,nb)
+                              nb = parse(Int64,split(nb[2])[1])
                         end
                   end
             end
