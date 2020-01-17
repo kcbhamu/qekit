@@ -163,51 +163,58 @@ module qekit
 
       end
 
-      function get_band(; prefix,pwband,tmp,spin)
+      function get_band(; prefix,pwband,tmp)
             # write filband input for bands.x
-            filband = """&BANDS
-                   outdir=\"$tmp\",
-                   prefix=\"$prefix\",
-                   filband=\"tmp.band\",
-                   spin_component = $spin
-                  /
-                  """
+            for ispin in 1:2
+                  filband = """&BANDS
+                         outdir=\"$tmp\",
+                         prefix=\"$prefix\",
+                         filband=\"tmp.band\",
+                         spin_component = $ispin
+                        /
+                        """
 
-            open("filband.in","w") do io
-                  write(io,filband)
-            end
-            # run bands.x
-            Shell.run("bands.x -in filband.in")
+                  open("filband.in","w") do io
+                        write(io,filband)
+                  end
+                  # run bands.x
+                  Shell.run("bands.x -in filband.in")
 
-            # read bands data
-            nb = 0
-            open(pwband) do file
-                  for (iline,line) in enumerate(eachline(file))
-                        if occursin("nbnd",line) == true
-                              nb = split(line,"=")
-                              nb = parse(Int64,split(nb[2])[1])
+                  # read bands data
+                  nb = 0
+                  open(pwband) do file
+                        for (iline,line) in enumerate(eachline(file))
+                              if occursin("nbnd",line) == true
+                                    nb = split(line,"=")
+                                    nb = parse(Int64,split(nb[2])[1])
+                              end
                         end
                   end
+
+                  x = readdlm("tmp.band.gnu")
+                  len = Int(size(x,1)/nb)
+                  en = x[1:len,1]
+                  x = x[:,2]
+
+                  bnd = zeros(Float64,len,nb)
+                  for i in 1:nb
+                        bnd[:,i] = x[1+len*(i-1):len+len*(i-1)]
+                  end
+
+                  # remove cache file
+                  Shell.run("rm -rf filband.in")
+                  Shell.run("rm -rf tmp.band")
+                  Shell.run("rm -rf tmp.band.gnu")
+                  Shell.run("rm -rf tmp.band.rap")
+
+                  if ispin == 1
+                        h5write("data.h5","band/kpath", en)
+                        h5write("data.h5","band/bands_up", bnd)
+                  elseif ispin == 2
+                        h5write("data.h5","band/bands_dw", bnd)
+                  end
+
             end
-
-            x = readdlm("tmp.band.gnu")
-            len = Int(size(x,1)/nb)
-            en = x[1:len,1]
-            x = x[:,2]
-
-            bnd = zeros(Float64,len,nb)
-            for i in 1:nb
-                  bnd[:,i] = x[1+len*(i-1):len+len*(i-1)]
-            end
-
-            # remove cache file
-            Shell.run("rm -rf filband.in")
-            Shell.run("rm -rf tmp.band")
-            Shell.run("rm -rf tmp.band.gnu")
-            Shell.run("rm -rf tmp.band.rap")
-
-            h5write("data.h5","band/kpath", en)
-            h5write("data.h5","band/bands", bnd)
 
             @info "bands data is saved in data.h5"
       end
