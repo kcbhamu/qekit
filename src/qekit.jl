@@ -1,325 +1,302 @@
 module qekit
-      using Shell
-      using DelimitedFiles
-      using HDF5
+    using Shell
+    using HDF5
+    using Suppressor
+    using DelimitedFiles
 
-      struct pre
+    import Base: show
 
-      end
+    struct qe
+        out    :: Dict{String,String}
+        prefix :: String
+        nspin
+        fermi  :: Float64
+        energy :: Float64
+        magnet
+        charge
+    end
 
-      struct post
+    struct wannier90
+    end
 
-      end
+    function qe_config(prefix; scf_out)
+        # Read Outdir in prefix.scf
+        scf_in = prefix * ".scf"
+        outdir = split(read(`grep "outdir" $scf_in`,String),"=")[2]
+        outdir = split(outdir,"\"")[2]
 
-      function check_kpoint(scf_file,nk; offset=false)
-            scf = scf_file
-            Shell.run("cp $scf tmp_scf")
+        # Read Fermi energy
+        fermi = split(read(`grep "the Fermi energy is" $scf_out`,String))[5]
+        fermi = parse(Float64,fermi)
 
-            if offset==false
-                  off = 0
+        # Read Total energy
+        energy = split(read(`grep "!    total energy" $scf_out`,String),"=")
+        energy = parse(Float64,split(energy[2])[1])
+
+        # Read nspin
+        try
+            nspn = split(read(`grep "nspin" $scf_in`,String),"=")[2]
+            if parse(Float64,nspn) == 1
+                global nspn = [1]
             else
-                  off = 1
+                global nspn = [1,2]
+            end
+        catch
+            global nspn = [1]
+        end
+
+        # Read Magnet # TO DO
+
+        # Read Charge # TO DO
+
+        # Construct struct
+        out = Dict("outdir" => outdir,
+                   "scf_out" => scf_out)
+        return qe(out,prefix,nspn,fermi,energy,Dict(),Dict())
+    end
+
+    #TO DO
+    function show(io::IO,crystal::qe)
+    end
+
+    getMagnet(crystal::qe) = crystal.magnet
+    getFermi(crystal::qe) = crystal.fermi
+    getEnergy(crystal::qe) = crystal.energy
+    getCharge(crysta::qe) = crystal.charge
+
+    function pw_band(crystal::qe)
+        prefix = crystal.prefix
+        outdir = crystal.out["outdir"]
+        nspin  = crystal.nspin
+
+        # local variable to be used in for loop
+        local kp,band
+        # Start iteration for every spin up and down
+        for spin in nspin
+            if typeof(spin) == String
+                spin = "\"none\""
+            end
+            filband = """&BANDS
+                     outdir         = '$outdir'
+                     prefix         = '$prefix'
+                     filband        = 'tmp.band'
+                     spin_component = $spin
+                    /
+                    """
+            open("filband.in","w") do io
+                write(io,filband)
             end
 
-            data = []
-            for k in nk
-                  pos = -1
-                  f = open("tmp_scf") do file
-                        for (iline,line) in enumerate(eachline(file))
-                              if occursin("K_POINTS",line) == true
-                                    pos = iline
-                              end
-                              if iline == pos + 1
-                                    kline = " $k  $k  $k  $off $off $off"
-                                    cmd = "sed -i 's/$line/$kline/g' tmp_scf"
-                                    Shell.run(cmd)
-                                    break
-                              end
-                        end
-                  end
+            # Run bands.x
+            @info "Collecting the bands"
+            @suppress run(`bands.x -in filband.in`)
 
-                  prefix = "k_analysis.out"
-                  @info "Running for $k  $k  $k  $off $off $off"
+            # Read bands data
+            fband = readdlm("tmp.band.gnu")
 
-                  cmd = "mpirun -np 4 pw.x -in tmp_scf > $prefix"
-                  Shell.run(cmd)
-
-                  f = open(prefix) do file
-                        for (iline,line) in enumerate(eachline(file))
-                              if occursin("!    total energy",line) == true
-                                    en = split(line,"=")
-                                    en = parse(Float64,split(en[2])[1])
-                                    push!(data,en)
-                              end
-                        end
-                  end
-                  Shell.run("rm -rf $prefix")
+            # Read number of bands
+            if spin == 1
+                nb = split(read(`grep "nbnd=" tmp.band`,String),"=")[2]
+                nb = parse(Int64,split(nb,",")[1])
             end
-            Shell.run("rm -rf tmp_scf")
-            return data
-      end
 
-      function check_ecut(scf_file,ecut)
-            scf = scf_file
-            Shell.run("cp $scf tmp_scf")
+            # Separate kpath and bands data
+            kp  = fband[1:Int(size(fband,1)/nb),1]
+            bands = fband[:,2]
 
-            data = []
-            for ec in ecut
-                  pos = -1
-                  f = open("tmp_scf") do file
-                        for (iline,line) in enumerate(eachline(file))
-                              if occursin("ecutwfc",line) == true
-                                    cline = "ecutwfc=$ec"
-                                    cmd = "sed -i 's/$line/$cline/g' tmp_scf"
-                                    Shell.run(cmd)
-                              elseif occursin("ecutrho",line) == true
-                                    er = ec*5
-                                    cline = "ecutrho=$er"
-                                    cmd = "sed -i 's/$line/$cline/g' tmp_scf"
-                                    Shell.run(cmd)
-                              end
-                        end
-                  end
-
-                  case = "ecut = $ec"
-                  @info "Running for $case"
-                  cmd = "mpirun -np 4 pw.x -in tmp_scf > ecut_analysis.out"
-                  Shell.run(cmd)
-
-                  prefix = "ecut_analysis.out"
-                  f = open(prefix) do file
-                        for (iline,line) in enumerate(eachline(file))
-                              if occursin("!    total energy",line) == true
-                                    en = split(line,"=")
-                                    en = split(en[2])[1]
-                                    en = parse(Float64,en)
-                                    push!(data,en)
-                              end
-                        end
-                  end
-
-                  Shell.run("rm -rf $prefix")
+            # Write bands to column vectors
+            len = Int(size(fband,1)/nb)
+            bnd = zeros(Float64,len,nb)
+            for i in 1:nb
+                bnd[:,i] = bands[1+len*(i-1):len+len*(i-1)]
             end
-            Shell.run("rm -rf tmp_scf")
-            return data
 
-      end
+            # remove cache file
+            run(`rm -rf filband.in tmp.band tmp.band.gnu tmp.band.rap`)
 
-      function get_dos(; prefix, tmp, erange)
-            # write fildos for dos.x input
-            fildos = """&DOS
-                   prefix=\"$prefix\",
-                   outdir=\"$tmp\",
-                   Emin=$(erange[1])
-                   Emax=$(erange[2])
-                   fildos=\"tmp.dos\"
+            # Concatinate the band if nspin = 2
+            if spin == 1
+                band = bnd
+            elseif spin == 2
+                dummy = zeros(Float64,2,size(band)...)
+                dummy[1,:,:] = band
+                dummy[2,:,:] = bnd
+                band = dummy
+            end
+        end
+
+        h5write("data.h5","pw_band/kpath", kp)
+        h5write("data.h5","pw_band/bands", band)
+
+        @info "bands data is saved in data.h5"
+    end
+
+    function pw_dos(crystal::qe; erange)
+        prefix = crystal.prefix
+        outdir = crystal.out["outdir"]
+        nspin  = crystal.nspin
+
+        # input file for dos.x
+        fildos = """&DOS
+                   prefix = '$prefix',
+                   outdir = '$outdir',
+                   Emin   = $(erange[1])
+                   Emax   = $(erange[2])
+                   fildos = 'tmp.dos'
                   /
                   """
 
-            open("fildos.in","w") do io
-                  write(io,fildos)
+        # write fildos
+        open("fildos.in","w") do io
+            write(io,fildos)
+        end
+
+        # run dos.x
+        @info "Collecting density of states"
+        @suppress run(`dos.x -in fildos.in`)
+
+        # read dos data
+        fdos = readdlm("tmp.dos")
+        # get energy bins
+        w = convert(Vector{Float64},fdos[2:end,1])
+        # get dos data for spin up
+        dos = convert(Vector{Float64},fdos[2:end,2])
+        ## for spin down, and concatinate them
+        tmp_dos = convert(Vector{Float64},fdos[2:end,3])
+        dos = hcat(dos,tmp_dos)
+        cum_occ = convert(Vector{Float64},fdos[2:end,4])
+
+        # remove cache file
+        run(`rm -rf fildos.in tmp.dos.in tmp.dos`)
+
+        # write data to hdf5 file
+        h5write("data.h5", "pw_dos/energies", w)
+        h5write("data.h5", "pw_dos/dos", dos)
+        h5write("data.h5", "pw_dos/cum_occ", cum_occ)
+        @info "density of state of the system is saved in data.h5"
+    end
+
+    function pw_pdos(crystal::qe; erange)
+        prefix = crystal.prefix
+        outdir = crystal.out["outdir"]
+        nspin  = crystal.nspin
+
+        # function to detect list of all outputs file
+        # that is produced by projwfc.x
+        function outputs()
+            fil = readdir() # list of all files
+            idx = [] # empty array, for pdos index file
+            for (ifil,dfil) in enumerate(fil)
+                # if there are any file that contain names pdos.dat,
+                # put the file into list
+                if findfirst("pdos.dat",dfil) != nothing append!(idx,ifil) end
             end
+            return fil[idx]
+        end
 
-            # run dos.x
-            Shell.run("dos.x -in fildos.in")
+        # list of all orbital species
+        # TO DO for f-band
+        s = ["s"]
+        p = ["pz", "px", "py"]
+        d = ["dz2", "dzx", "dzy", "dx2-y2", "dxy"]
 
-            # read dos data
-            x = readdlm("tmp.dos")
-            if typeof(x[2,4]) == Float64
-                  nspin = 2
-            else
-                  nspin = 1
-            end
-
-            w = x[2:end,1]
-            w = convert(Vector{Float64},w)
-            if nspin == 2
-                  dup = convert(Vector{Float64},x[2:end,2])
-                  ddw = convert(Vector{Float64},x[2:end,3])
-                  cum_occ = convert(Vector{Float64},x[2:end,4])
-
-                  Shell.run("rm -rf fildos.in")
-                  Shell.run("rm -rf tmp.dos")
-
-                  h5write("data.h5","totalDOS/E (eV)", w)
-                  h5write("data.h5","totalDOS/DOS_up", dup)
-                  h5write("data.h5","totalDOS/DOS_dw", ddw)
-                  h5write("data.h5","totalDOS/cum_DOS", cum_occ)
-
-                  @info "total DOS data is saved in data.h5"
-            elseif nspin == 1
-                  dos = convert(Vector{Float64},x[2:end,2])
-                  cum_occ = convert(Vector{Float64},x[2:end,3])
-
-                  Shell.run("rm -rf fildos.in")
-                  Shell.run("rm -rf tmp.dos")
-
-                  h5write("data.h5","totalDOS/E (eV)", w)
-                  h5write("data.h5","totalDOS/DOS", dos)
-                  h5write("data.h5","totalDOS/cum_DOS", cum_occ)
-
-                  @info "total DOS data is saved in data.h5"
-            end
-
-      end
-
-      function get_band(; prefix,pwband,tmp)
-            # write filband input for bands.x
-            for ispin in 1:2
-                  filband = """&BANDS
-                         outdir=\"$tmp\",
-                         prefix=\"$prefix\",
-                         filband=\"tmp.band\",
-                         spin_component = $ispin
-                        /
-                        """
-
-                  open("filband.in","w") do io
-                        write(io,filband)
-                  end
-                  # run bands.x
-                  Shell.run("bands.x -in filband.in")
-
-                  # read bands data
-                  nb = 0
-                  open(pwband) do file
-                        for (iline,line) in enumerate(eachline(file))
-                              if occursin("nbnd",line) == true
-                                    nb = split(line,"=")
-                                    nb = parse(Int64,split(nb[2])[1])
-                              end
-                        end
-                  end
-
-                  x = readdlm("tmp.band.gnu")
-                  len = Int(size(x,1)/nb)
-                  en = x[1:len,1]
-                  x = x[:,2]
-
-                  bnd = zeros(Float64,len,nb)
-                  for i in 1:nb
-                        bnd[:,i] = x[1+len*(i-1):len+len*(i-1)]
-                  end
-
-                  # remove cache file
-                  Shell.run("rm -rf filband.in")
-                  Shell.run("rm -rf tmp.band")
-                  Shell.run("rm -rf tmp.band.gnu")
-                  Shell.run("rm -rf tmp.band.rap")
-
-                  if ispin == 1
-                        h5write("data.h5","band/kpath", en)
-                        h5write("data.h5","band/bands_up", bnd)
-                  elseif ispin == 2
-                        h5write("data.h5","band/bands_dw", bnd)
-                  end
-
-            end
-
-            @info "bands data is saved in data.h5"
-      end
-
-      function get_pdos(; prefix, outdir, erange)
-            function output()
-                  fil = readdir()
-
-                  idx = []
-                  for (ifil,dfil) in enumerate(fil)
-                        if findfirst("pdos.dat",dfil) != nothing append!(idx,ifil) end
-                  end
-                  return fil[idx]
-            end
-
-            # orbital_species
-            s = ["s"]
-            p = ["pz", "px", "py"]
-            d = ["dz2", "dzx", "dzy", "dx2-y2", "dxy"]
-
-            # write filproj input for projwfc.x
-            filproj = """&PROJWFC
-             prefix=\"$prefix\",
-             outdir=\"$outdir\",
-             Emin=$(erange[1]),
-             Emax=$(erange[2]),
-             filpdos=\"pdos.dat\"
+        # write input file for projwfc.x
+        filproj = """&PROJWFC
+             prefix = '$prefix',
+             outdir = '$outdir',
+             Emin   = $(erange[1]),
+             Emax   = $(erange[2]),
+             filpdos= 'pdos.dat'
             /
             """
+        open("filproj.in","w") do io
+            write(io,filproj)
+        end
 
-            open("filproj.in","w") do io
-                  write(io,filproj)
+        # run projwfc.x
+        @info "Collecting projected dos"
+        @suppress run(`projwfc.x -in filproj.in`)
+
+        # list of all output files
+        fil = outputs()
+
+        # get the data for every proj dos file, except the last one
+        for (ifil,dfil) in enumerate(fil[1:end-1])
+            # get atom identity (name, wavefunction number, and orbital)
+            ## if the atom has two words, ex : Sr, Ti, etc
+            ## then there are shift on the index
+            shift = 0
+            if dfil[22] != ')' shift = 1 end
+            atom = "atom_"*dfil[19:22+shift]
+            wfc = dfil[28+shift]
+            orb = dfil[30+shift]
+
+            # convert orb to orbital species data
+            if (orb == 's') vorb = s end
+            if (orb == 'p') vorb = p end
+            if (orb == 'd') vorb = d end
+
+            # read the file
+            data = readdlm(dfil)
+
+            # write energy bins to file
+            # only once
+            if ifil == 1
+                energies = float.(data[2:end,1])
+                h5write("data.h5", "pdos/energies", energies)
             end
 
-            # run projwfc.x
-            Shell.run("projwfc.x -in filproj.in")
+            # write pdos and ldos data to file, for each atom
+            # number of total dos data for each file is (ldos + orbital_species)
+            ndata_start = 2 # start from 2, because 1 is energy bins
+            ndata_end   = (1 + length(vorb))
+            for ildos in ndata_start:2:(2*ndata_end + 1) # jump every 2, because spins
+                dosup = float.(data[2:end,ildos])
+                dosdw = float.(data[2:end,ildos+1])
+                dos   = hcat(dosup,dosdw)
 
-            # output file
-            fil = output()
+                # the first one is for ldos
+                if ildos == 2
+                    path = joinpath("pdos",atom,wfc*orb,"ldos")
+                else # else for pdos for each orbital
+                    # after ldos, run for every orbital species
+                    iorb = floor(Int,ildos/2) - 1
+                    path = joinpath("pdos",atom,wfc*orb,vorb[iorb])
+                end
+                # read the data to file
+                h5write("data.h5", path, dos)
+            end
+        end
 
-            # save file to data.h5
-            for (ifil,dfil) in enumerate(fil[1:end-1])
-                  #get atom name
-                  if dfil[22] == ')'
-                        atom = "atom_"*dfil[19:22]
-                        wfc = dfil[28]
-                        orb = dfil[30]
-                        data = readdlm(dfil)
-                  else
-                        atom = "atom_"*dfil[19:23]
-                        wfc = dfil[29]
-                        orb = dfil[31]
-                        data = readdlm(dfil)
-                  end
+        # Remove cache files
+        run(`rm -rf filproj.in lowdin.txt`)
+        Shell.run("rm -rf pdos.dat.*")
 
-                  # write energy mesh to file
-                  if ifil == 1
-                        mesh = float.(data[2:end,1])
-                        h5write("data.h5", "partialDOS/E(eV)", mesh)
-                  end
+        @info "pdos data is saved in data.h5"
+    end
 
-                  # write pdos/ldos data
-                  # number of dos data = nspin * (total_dos + orbital_species)
-                  # ob = s/p/d
-                  if orb == 's'
-                        ob = s
-                  elseif orb == 'p'
-                        ob = p
-                  elseif orb == 'd'
-                        ob = d
-                  end
+    function get_w90Input(crystal::qe)
+    end
 
-                  # write for each atom
-                  # size is nspin*(Ldos + norb)
-                  # shift +1 because the first column is mesh
-                  # start from 2 to size
-                  for i in 2:( 2*(1+length(ob)) + 1 )
-                        dos = float.(data[2:end,i])
+    function w90_band(w90::wannier90)
+    end
 
-                        # the first two is for Local DOS data for orbital
-                        if i == 2
-                              path = "partialDOS/"*atom*"/"*wfc*orb*"/LDOSup"
-                              h5write("data.h5", path, dos)
-                        elseif i == 3
-                              path = "partialDOS/"*atom*"/"*wfc*orb*"/LDOSdw"
-                              h5write("data.h5", path, dos)
-                        # else is partial DOS for each orbital species
-                        else
-                              iob = floor(Int,i/2) - 1
-                              if i % 2 == 0
-                                    path = "partialDOS/"*atom*"/"*wfc*orb*"/"*ob[iob]*"_up"
-                                    h5write("data.h5", path, dos)
-                              else
-                                    path = "partialDOS/"*atom*"/"*wfc*orb*"/"*ob[iob]*"_dw"
-                                    h5write("data.h5", path, dos)
-                              end
-                        end
-                  end #end for
-            end #end for
+    function w90_pdos(w90::wannier90)
+    end
 
-            Shell.run("rm -rf filproj.in")
-            Shell.run("rm -rf lowdin.txt")
-            Shell.run("rm -rf pdos.dat.*")
+    function w90_boltz(w90::wannier90)
+    end
 
-            @info "Partial DOS data is saved in data.h5"
-      end
+    function w90_berry(w90::wannier90)
+    end
 
-end #end qekit module
+    function qekit_info()
+    end
+
+    function w90_lib()
+    end
+
+    function pw_lib()
+    end
+
+end
